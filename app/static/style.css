@@ -50,6 +50,12 @@ body {
   font-weight: 700; line-height: 1.1;
 }
 .brand span { font-size: 11px; color: var(--muted); letter-spacing: .5px; }
+.credit {
+  font-size: 10px; letter-spacing: .3px; font-weight: 400;
+  color: var(--muted); text-decoration: none; opacity: .65;
+  margin-left: 8px; vertical-align: middle;
+}
+.credit:hover { opacity: 1; text-decoration: underline; color: var(--text); }
 .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
