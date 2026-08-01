@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Playwright
+.cache/
+
+# Dados coletados (gerados em runtime, não fazem parte do código)
+output/
+
+# Editores / SO
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Configuração local do Claude Code (mantém apenas o necessário versionado)
+.claude/settings.local.json

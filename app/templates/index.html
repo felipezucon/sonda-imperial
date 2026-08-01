@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sonda Imperial — Inteligência de Anúncios Meta</title>
+<link rel="icon" href="/assets/sonda.png">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<header class="topbar">
+  <img src="/assets/sonda.png" alt="" class="logo">
+  <div class="brand">
+    <h1>SONDA IMPERIAL</h1>
+    <span>Inteligência de anúncios · Biblioteca de Anúncios Meta</span>
+  </div>
+  <div class="topbar-right">
+    <span id="statusDot" class="dot idle" title="Pronta"></span>
+    <button class="ghost" id="btnFolder" title="Abrir a pasta com os arquivos exportados">📁 Resultados</button>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ===================== PAINEL DE COMANDO ===================== -->
+  <aside class="sidebar">
+    <section class="card" aria-label="Nova varredura">
+      <h2>Nova varredura</h2>
+
+      <label for="keyword">Termo de busca</label>
+      <input id="keyword" type="text" placeholder="ex.: nanoblading" autocomplete="off" autofocus>
+
+      <div class="row2">
+        <div>
+          <label for="country">País</label>
+          <select id="country">
+            <option value="BR" selected>Brasil</option>
+            <option value="US">Estados Unidos</option>
+            <option value="PT">Portugal</option>
+            <option value="ES">Espanha</option>
+            <option value="MX">México</option>
+            <option value="AR">Argentina</option>
+            <option value="ALL">Todos os países</option>
+          </select>
+        </div>
+        <div>
+          <label for="maxResults">Quantidade</label>
+          <select id="maxResults">
+            <option value="50">50 · rápido</option>
+            <option value="100" selected>100 · recomendado</option>
+            <option value="300">300 · profundo</option>
+            <option value="0">Ilimitado</option>
+          </select>
+        </div>
+      </div>
+
+      <label>Status dos anúncios</label>
+      <div class="segmented" role="radiogroup" aria-label="Status dos anúncios">
+        <button class="seg active" data-status="active" role="radio" aria-checked="true">Ativos</button>
+        <button class="seg" data-status="all" role="radio" aria-checked="false">Todos</button>
+        <button class="seg" data-status="inactive" role="radio" aria-checked="false">Inativos</button>
+      </div>
+
+      <details class="advanced">
+        <summary>Avançado — colar URL da Biblioteca</summary>
+        <input id="rawUrl" type="text" placeholder="https://www.facebook.com/ads/library/?...">
+        <p class="hint">Se preenchida, a URL substitui o termo/país acima.</p>
+      </details>
+
+      <button id="btnRun" class="primary">▶ &nbsp;Iniciar varredura</button>
+
+      <div id="progressBox" class="progress hidden" aria-live="polite">
+        <div class="bar"><div id="barFill" class="fill"></div></div>
+        <div class="progress-row">
+          <span id="progressText">Sondando…</span>
+          <button id="btnCancel" class="ghost small">Cancelar</button>
+        </div>
+      </div>
+
+      <p id="formError" class="error hidden" role="alert"></p>
+    </section>
+
+    <section class="card grow" aria-label="Histórico de varreduras">
+      <h2>Histórico</h2>
+      <ul id="historyList" class="history"></ul>
+      <p id="historyEmpty" class="hint">Nenhuma varredura ainda.</p>
+    </section>
+  </aside>
+
+  <!-- ===================== RESULTADOS ===================== -->
+  <section class="content" id="content">
+
+    <div id="emptyState" class="empty">
+      <img src="/assets/sonda.png" alt="" width="110">
+      <h2>A sonda aguarda ordens</h2>
+      <p>Digite um <strong>termo de busca</strong> (nicho, produto ou concorrente),<br>
+         escolha o país e a quantidade, e inicie a varredura.</p>
+      <p class="hint">Os anúncios coletados aparecem aqui e são exportados<br>automaticamente em JSON e CSV.</p>
+    </div>
+
+    <div id="results" class="hidden">
+      <div class="summary-bar">
+        <div class="chips" id="chips"></div>
+        <div class="actions">
+          <button class="ghost" id="btnJson">Abrir JSON</button>
+          <button class="ghost" id="btnCsv">Abrir CSV</button>
+        </div>
+      </div>
+
+      <div class="panels">
+        <div class="panel force-panel">
+          <h3 title="60% tempo no ar (satura em 180 dias) + 25% variações do criativo + 15% plataformas. Inativos: penalidade de 30%.">⚡ Vencedores · Índice de Força</h3>
+          <ul id="topForce"></ul>
+        </div>
+        <div class="panel"><h3>Principais anunciantes</h3><ul id="topPages"></ul></div>
+        <div class="panel"><h3>CTAs mais usados</h3><ul id="topCtas"></ul></div>
+        <div class="panel"><h3>Formatos & destinos</h3><ul id="formats"></ul></div>
+      </div>
+
+      <h3 class="grid-title" id="gridTitle" title="60% tempo no ar + 25% variações do criativo + 15% plataformas. Inativos: penalidade de 30%.">Anúncios coletados</h3>
+      <div class="grid" id="adsGrid"></div>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden" role="status"></div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
