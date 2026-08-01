@@ -55,6 +55,30 @@ playwright install chromium
 
 Isso instala as dependências (`playwright`, `rich`, `flask`, `pywebview`) e baixa o Chromium que o Playwright usa internamente (~200 MB, download único).
 
+### 🤖 Peça para a sua IA instalar isso
+
+Se você usa um assistente de IA com acesso ao terminal (Claude Code, Cursor, Copilot Workspace, etc.), cole o prompt abaixo — ele clona, instala e configura tudo sozinho, incluindo o atalho na área de trabalho.
+
+```
+Instale a aplicação "Sonda Imperial" no meu computador a partir de
+https://github.com/SaldanhaC3/sonda-imperial
+
+Siga estes passos:
+1. Clone o repositório para uma pasta apropriada (pergunte onde, se não for óbvio).
+2. Rode `pip install -r requirements.txt` e depois `playwright install chromium`
+   dentro da pasta clonada.
+3. No Windows, crie um atalho na área de trabalho chamado "Sonda Imperial" que
+   execute `pythonw SondaImperial.pyw` a partir da pasta do projeto, usando o
+   ícone `assets/sonda.ico`. Em macOS/Linux, explique como rodar
+   `python SondaImperial.pyw` (ou crie um lançador equivalente do SO).
+4. Abra a aplicação (ou rode `python app.py` / `python -m fb_ads_scraper --help`)
+   para confirmar que instalou corretamente, e me mostre o resultado.
+
+Não é necessária nenhuma chave de API ou login — a ferramenta usa a Biblioteca
+de Anúncios pública do Facebook. Se `playwright install chromium` falhar,
+verifique se há Python 3.9+ instalado e tente novamente.
+```
+
 ## Aplicação desktop — Sonda Imperial
 
 <p align="center">
