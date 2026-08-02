@@ -187,11 +187,11 @@ $("adsGrid").addEventListener("click", (e) => {
 });
 
 function adCard(ad) {
-  const libUrl = `https://www.facebook.com/ads/library/?id=${ad.id}`;
+  const libUrl = `https://www.facebook.com/ads/library/?id=${encodeURIComponent(ad.id ?? "")}`;
   const thumb = ad.thumb
     ? `<img src="${esc(ad.thumb)}" alt="" loading="lazy" onerror="this.remove()">`
     : "";
-  const tierClass = (ad.tier || "").replace(" ", "-");
+  const tierClass = esc((ad.tier || "").replace(" ", "-"));
   const scoreTitle = `Índice de Força ${ad.score} (${esc(ad.tier || "")}) — ${ad.days ?? "?"} dias no ar`
     + (ad.variations > 1 ? `, ${ad.variations} variações do criativo` : "");
   const vgBadge = ad.var_group
