@@ -38,6 +38,8 @@ def main(argv=None):
                         help="Abre o navegador visível (útil para depuração)")
     parser.add_argument("--timeout", type=int, default=600,
                         help="Tempo máximo de coleta em segundos (padrão: 600)")
+    parser.add_argument("--allow-empty", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--require-complete", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     console = Console()
@@ -65,6 +67,7 @@ def main(argv=None):
         headful=args.headful,
         timeout=args.timeout,
         console=console,
+        fail_on_incomplete=args.require_complete,
     )
 
     try:
@@ -79,7 +82,7 @@ def main(argv=None):
         console.print(f"[red]Erro:[/red] {exc}")
         return 1
 
-    if not ads:
+    if not ads and not args.allow_empty:
         console.print(
             "[yellow]Nenhum anúncio encontrado.[/yellow] Verifique se a busca retorna "
             "resultados no navegador ou tente novamente com --headful."

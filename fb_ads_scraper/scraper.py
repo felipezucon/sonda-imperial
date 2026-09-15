@@ -22,18 +22,19 @@ COOKIE_BUTTON_RE = re.compile(
 )
 
 # Quantas rolagens consecutivas sem anúncios novos indicam fim da lista
-MAX_STAGNANT_SCROLLS = 8
+MAX_STAGNANT_SCROLLS = 60
 
 
 class AdLibraryScraper:
     def __init__(self, url, max_results=0, headful=False, timeout=600, console=None,
-                 on_progress=None):
+                 on_progress=None, fail_on_incomplete=False):
         self.url = url
         self.max_results = max_results
         self.headful = headful
         self.timeout = timeout
         self.console = console or Console()
         self.on_progress = on_progress  # callback(count) para interfaces gráficas
+        self.fail_on_incomplete = fail_on_incomplete
         self.cancel_requested = False   # setar True (de outra thread) interrompe a coleta
         self.raw_ads = {}  # ad_archive_id -> objeto bruto
 
@@ -159,9 +160,13 @@ class AdLibraryScraper:
 
             while not self._reached_limit():
                 if self.cancel_requested:
+                    if self.fail_on_incomplete:
+                        raise RuntimeError("coleta cancelada antes da conclusão")
                     self.console.print("\n[yellow]Coleta cancelada; exportando o que foi coletado.[/yellow]")
                     break
                 if time.time() - start > self.timeout:
+                    if self.fail_on_incomplete:
+                        raise RuntimeError("coleta excedeu o timeout")
                     self.console.print(
                         f"\n[yellow]Tempo limite de {self.timeout}s atingido; "
                         "exportando o que foi coletado.[/yellow]"
@@ -169,7 +174,9 @@ class AdLibraryScraper:
                     break
                 try:
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                except Exception:
+                except Exception as exc:
+                    if self.fail_on_incomplete:
+                        raise RuntimeError(f"falha durante paginação: {exc}") from exc
                     break
                 page.wait_for_timeout(1500)
 
