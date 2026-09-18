@@ -1,7 +1,9 @@
 """Interface de linha de comando."""
 
 import argparse
+import json
 import sys
+from pathlib import Path
 from urllib.parse import quote, urlparse
 
 from rich.console import Console
@@ -40,6 +42,7 @@ def main(argv=None):
                         help="Tempo máximo de coleta em segundos (padrão: 600)")
     parser.add_argument("--allow-empty", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--require-complete", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--result-envelope", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     console = Console()
@@ -73,6 +76,8 @@ def main(argv=None):
     try:
         ads = scraper.run()
     except KeyboardInterrupt:
+        scraper.complete = False
+        scraper.stop_reason = "CANCELLED"
         console.print("\n[yellow]Interrompido pelo usuário; exportando o que foi coletado.[/yellow]")
         from .parser import parse_ad
         ads = [parse_ad(raw) for raw in scraper.raw_ads.values()]
@@ -88,6 +93,28 @@ def main(argv=None):
             "resultados no navegador ou tente novamente com --headful."
         )
         return 1
+
+    if args.result_envelope:
+        advertisers = {
+            str(ad.get("page_id") or ad.get("page_name"))
+            for ad in ads
+            if ad.get("page_id") or ad.get("page_name")
+        }
+        result = {
+            "ads": ads,
+            "complete": scraper.complete,
+            "stopReason": scraper.stop_reason,
+            "collectionDurationSeconds": scraper.collection_duration_seconds,
+            "rawAdsObserved": scraper.raw_ads_observed,
+            "uniqueAdIds": len({str(ad.get("ad_archive_id")) for ad in ads}),
+            "uniqueAdvertisers": len(advertisers),
+        }
+        output = Path(args.output)
+        output.mkdir(parents=True, exist_ok=True)
+        path = output / "radar-result.json"
+        path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        console.print(f"[green]{len(ads)} anúncios exportados:[/green] {path}")
+        return 0
 
     paths = export(ads, args.url, output_dir=args.output, fmt=args.format)
     console.print(f"[green]{len(ads)} anúncios exportados:[/green]")

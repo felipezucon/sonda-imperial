@@ -37,6 +37,10 @@ class AdLibraryScraper:
         self.fail_on_incomplete = fail_on_incomplete
         self.cancel_requested = False   # setar True (de outra thread) interrompe a coleta
         self.raw_ads = {}  # ad_archive_id -> objeto bruto
+        self.raw_ads_observed = 0
+        self.complete = True
+        self.stop_reason = None
+        self.collection_duration_seconds = 0
 
     # ------------------------------------------------------------------
     # Ingestão de payloads
@@ -45,6 +49,7 @@ class AdLibraryScraper:
     def _ingest_payload(self, payload):
         added = 0
         for raw in extract_ads_from_payload(payload):
+            self.raw_ads_observed += 1
             ad_id = str(raw.get("ad_archive_id"))
             if ad_id not in self.raw_ads:
                 self.raw_ads[ad_id] = raw
@@ -155,18 +160,22 @@ class AdLibraryScraper:
             self._report_progress()
 
             stagnant = 0
-            start = time.time()
+            start = time.monotonic()
             last_count = len(self.raw_ads)
 
             while not self._reached_limit():
                 if self.cancel_requested:
                     if self.fail_on_incomplete:
                         raise RuntimeError("coleta cancelada antes da conclusão")
+                    self.complete = False
+                    self.stop_reason = "CANCELLED"
                     self.console.print("\n[yellow]Coleta cancelada; exportando o que foi coletado.[/yellow]")
                     break
-                if time.time() - start > self.timeout:
+                if time.monotonic() - start >= self.timeout:
                     if self.fail_on_incomplete:
                         raise RuntimeError("coleta excedeu o timeout")
+                    self.complete = False
+                    self.stop_reason = "TIME_LIMIT_REACHED"
                     self.console.print(
                         f"\n[yellow]Tempo limite de {self.timeout}s atingido; "
                         "exportando o que foi coletado.[/yellow]"
@@ -175,9 +184,7 @@ class AdLibraryScraper:
                 try:
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 except Exception as exc:
-                    if self.fail_on_incomplete:
-                        raise RuntimeError(f"falha durante paginação: {exc}") from exc
-                    break
+                    raise RuntimeError(f"falha durante paginação: {exc}") from exc
                 page.wait_for_timeout(1500)
 
                 if len(self.raw_ads) == last_count:
@@ -190,6 +197,8 @@ class AdLibraryScraper:
 
             self.console.print()  # encerra a linha de progresso
             browser.close()
+
+        self.collection_duration_seconds = int(time.monotonic() - start)
 
         ads = [parse_ad(raw) for raw in self.raw_ads.values()]
         if self.max_results:
