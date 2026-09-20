@@ -140,6 +140,7 @@ def parse_ad(raw):
         "ad_archive_id": raw.get("ad_archive_id"),
         "page_name": raw.get("page_name") or snapshot.get("page_name"),
         "page_id": raw.get("page_id") or snapshot.get("page_id"),
+        "actor_id": raw.get("actor_id") or snapshot.get("actor_id"),
         "page_like_count": snapshot.get("page_like_count"),
         "page_categories": snapshot.get("page_categories"),
         "page_profile_uri": snapshot.get("page_profile_uri"),
