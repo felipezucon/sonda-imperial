@@ -106,6 +106,8 @@ def main(argv=None):
             "stopReason": scraper.stop_reason,
             "collectionDurationSeconds": scraper.collection_duration_seconds,
             "rawAdsObserved": scraper.raw_ads_observed,
+            "totalResults": scraper.total_results,
+            "totalResultsSource": scraper.total_results_source,
             "uniqueAdIds": len({str(ad.get("ad_archive_id")) for ad in ads}),
             "uniqueAdvertisers": len(advertisers),
         }

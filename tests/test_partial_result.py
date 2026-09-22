@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fb_ads_scraper.cli import main
-from fb_ads_scraper.scraper import AdLibraryScraper
+from fb_ads_scraper.scraper import AdLibraryScraper, parse_total_results
 
 
 class _Page:
@@ -23,6 +23,9 @@ class _Page:
         if self.error:
             raise self.error
 
+    def locator(self, *_):
+        return type("Locator", (), {"inner_text": lambda *_args, **_kwargs: "~15 resultados"})()
+
 
 class _Browser:
     def __init__(self, page): self.page = page
@@ -39,6 +42,10 @@ class _PlaywrightContext:
 
 
 class PartialResultTests(unittest.TestCase):
+    def test_total_results_counter(self):
+        self.assertEqual(parse_total_results("Biblioteca\n~15 resultados\nFiltros"), 15)
+        self.assertEqual(parse_total_results("1.234 resultados"), 1234)
+        self.assertIsNone(parse_total_results("3 anúncios observados"))
     def _scraper(self, timeout=3600):
         scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", timeout=timeout)
         scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
@@ -63,16 +70,17 @@ class PartialResultTests(unittest.TestCase):
         self.assertIsNone(scraper.stop_reason)
 
     def test_cli_writes_partial_envelope(self):
-        scraper = type("Scraper", (), {"complete": False, "stop_reason": "TIME_LIMIT_REACHED", "collection_duration_seconds": 3600, "raw_ads_observed": 2, "run": lambda self: [{"ad_archive_id": "ad-1", "page_id": "page"}]})()
+        scraper = type("Scraper", (), {"complete": False, "stop_reason": "TIME_LIMIT_REACHED", "collection_duration_seconds": 3600, "raw_ads_observed": 2, "total_results": 15, "total_results_source": "META_RESULT_COUNTER", "run": lambda self: [{"ad_archive_id": "ad-1", "page_id": "page"}]})()
         with tempfile.TemporaryDirectory() as directory, patch("fb_ads_scraper.cli.AdLibraryScraper", return_value=scraper):
             self.assertEqual(main(["--keyword", "x", "--format", "json", "--result-envelope", "--output", directory]), 0)
             result = json.loads((Path(directory) / "radar-result.json").read_text())
         self.assertEqual(result["ads"][0]["ad_archive_id"], "ad-1")
         self.assertFalse(result["complete"])
         self.assertEqual(result["stopReason"], "TIME_LIMIT_REACHED")
+        self.assertEqual(result["totalResults"], 15)
 
     def test_cli_rejects_empty_partial_result(self):
-        scraper = type("Scraper", (), {"complete": False, "stop_reason": "TIME_LIMIT_REACHED", "collection_duration_seconds": 3600, "raw_ads_observed": 0, "run": lambda self: []})()
+        scraper = type("Scraper", (), {"complete": False, "stop_reason": "TIME_LIMIT_REACHED", "collection_duration_seconds": 3600, "raw_ads_observed": 0, "total_results": None, "total_results_source": None, "run": lambda self: []})()
         with tempfile.TemporaryDirectory() as directory, patch("fb_ads_scraper.cli.AdLibraryScraper", return_value=scraper):
             self.assertEqual(main(["--keyword", "x", "--result-envelope", "--output", directory]), 1)
             self.assertFalse((Path(directory) / "radar-result.json").exists())

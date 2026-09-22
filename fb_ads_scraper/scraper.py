@@ -23,6 +23,22 @@ COOKIE_BUTTON_RE = re.compile(
 
 # Quantas rolagens consecutivas sem anúncios novos indicam fim da lista
 MAX_STAGNANT_SCROLLS = 60
+TOTAL_RESULTS_RE = re.compile(
+    r"^\s*[~≈]?\s*([\d\s.,]+)\s+(?:resultados?|results?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_total_results(text):
+    """Lê apenas linhas que representam o contador total da interface."""
+    for line in (text or "").splitlines():
+        match = TOTAL_RESULTS_RE.match(line)
+        if not match:
+            continue
+        digits = re.sub(r"\D", "", match.group(1))
+        if digits:
+            return int(digits)
+    return None
 
 
 class AdLibraryScraper:
@@ -41,6 +57,8 @@ class AdLibraryScraper:
         self.complete = True
         self.stop_reason = None
         self.collection_duration_seconds = 0
+        self.total_results = None
+        self.total_results_source = None
 
     # ------------------------------------------------------------------
     # Ingestão de payloads
@@ -114,6 +132,15 @@ class AdLibraryScraper:
         except Exception:
             pass  # banner não apareceu
 
+    def _read_total_results(self, page):
+        try:
+            text = page.locator("body").inner_text(timeout=10_000)
+        except Exception:
+            return
+        self.total_results = parse_total_results(text)
+        if self.total_results is not None:
+            self.total_results_source = "META_RESULT_COUNTER"
+
     def _report_progress(self):
         count = len(self.raw_ads)
         if self.max_results:
@@ -156,6 +183,7 @@ class AdLibraryScraper:
 
             self._dismiss_cookie_banner(page)
             page.wait_for_timeout(4000)
+            self._read_total_results(page)
             self._ingest_initial_html(page)
             self._report_progress()
 
