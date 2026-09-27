@@ -66,6 +66,17 @@ class PartialResultTests(unittest.TestCase):
         self.assertEqual(parse_total_results("1.234 resultados"), 1234)
         self.assertIsNone(parse_total_results("3 anúncios observados"))
 
+    def test_http_error_is_not_interpreted_as_meta_empty_state(self):
+        page = _Page()
+        page.goto = lambda *_, **__: SimpleNamespace(status=403)
+        context = _PlaywrightContext(page)
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/")
+        with patch("fb_ads_scraper.scraper.sync_playwright", return_value=context):
+            with self.assertRaisesRegex(RuntimeError, "META_HTTP_ERROR: HTTP 403"):
+                scraper.run()
+        self.assertFalse(scraper.empty_state_detected)
+        self.assertTrue(context.browser.closed)
+
     def test_meta_empty_state_is_explicit_and_tolerates_spacing_and_case(self):
         self.assertTrue(has_meta_empty_state(
             "Nenhum anúncio corresponde aos seus critérios de pesquisa"
@@ -162,6 +173,18 @@ class PartialResultTests(unittest.TestCase):
             self.assertEqual(main([
                 "https://www.facebook.com/ads/library/", "--format", "json", "--allow-empty",
             ]), 1)
+        self.assertFalse(scraper.complete)
+        self.assertEqual(scraper.stop_reason, "ADS_EXTRACTION_FAILED")
+
+    def test_cli_does_not_accept_unknown_zero_as_empty(self):
+        scraper = SimpleNamespace(
+            complete=True, stop_reason=None, collection_duration_seconds=1,
+            raw_ads_observed=0, total_results=0,
+            total_results_source="META_RESULT_COUNTER", empty_state_detected=False,
+            run=lambda: [],
+        )
+        with patch("fb_ads_scraper.cli.AdLibraryScraper", return_value=scraper):
+            self.assertEqual(main(["https://www.facebook.com/ads/library/", "--allow-empty"]), 1)
 
     def test_total_only_fails_without_counter_and_never_scrolls(self):
         page = _Page()

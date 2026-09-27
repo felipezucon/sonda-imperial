@@ -38,9 +38,11 @@ Ferramentas equivalentes (ex.: actors pagos do Apify) cobram por execução ou p
 ## Como funciona
 
 1. Você informa um termo de busca (ex.: `"nanoblading"`), país e quantidade desejada — ou cola uma URL da Ad Library com filtros avançados.
-2. A ferramenta monta a URL de busca e abre a Biblioteca de Anúncios num Chromium headless.
-3. Conforme a página rola automaticamente, a Ad Library carrega mais resultados via chamadas GraphQL internas — a ferramenta intercepta essas respostas de rede diretamente (sem depender de `doc_id`/tokens internos do Facebook, que mudam com frequência — por isso é resistente a atualizações do site).
+2. A ferramenta monta a URL de busca e abre a Biblioteca de Anúncios num Chromium.
+3. A primeira página pode incluir anúncios em scripts JSON do HTML; conforme rola, a Ad Library carrega mais resultados via respostas GraphQL. A Sonda lê os dois formatos.
 4. Cada anúncio é normalizado para um schema plano e consistente, pontuado pelo [Índice de Força](#-índice-de-força-pontuação-dos-anúncios), e exportado em **JSON** e **CSV**.
+
+O Collector usa `--headful` nas minerações por keyword: em controles reais, a Meta retornou HTTP 403 e nenhum payload de anúncios ao Chromium headless, enquanto a primeira execução headed recebeu os cards. O monitoring `--total-only` continua headless porque lê apenas o contador e não coleta cards. Respostas HTTP de erro são falhas técnicas, nunca empty state.
 
 ## Instalação
 

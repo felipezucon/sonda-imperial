@@ -194,7 +194,11 @@ class AdLibraryScraper:
             page.on("response", self._on_response)
 
             self.console.print(f"Abrindo: [dim]{self.url}[/dim]")
-            page.goto(self.url, wait_until="domcontentloaded", timeout=90_000)
+            response = page.goto(self.url, wait_until="domcontentloaded", timeout=90_000)
+
+            if response and response.status >= 400:
+                browser.close()
+                raise RuntimeError(f"META_HTTP_ERROR: HTTP {response.status}")
 
             if "/login" in page.url or "/checkpoint" in page.url:
                 browser.close()

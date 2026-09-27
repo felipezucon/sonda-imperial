@@ -91,16 +91,21 @@ def main(argv=None):
 
     if not ads and not args.total_only:
         if scraper.total_results is not None and scraper.total_results > 0:
-            console.print("[red]ADS_EXTRACTION_FAILED[/red]")
+            scraper.complete = False
+            scraper.stop_reason = "ADS_EXTRACTION_FAILED"
+            console.print(
+                f"[red]ADS_EXTRACTION_FAILED: totalResults={scraper.total_results}; "
+                f"adsObserved={scraper.raw_ads_observed}; stopReason={scraper.stop_reason}[/red]"
+            )
             return 1
-        if (
-            not args.allow_empty
-            and not getattr(scraper, "empty_state_detected", False)
-            and scraper.total_results != 0
+        if not (
+            getattr(scraper, "empty_state_detected", False)
+            and scraper.total_results == 0
+            and scraper.total_results_source == "META_EMPTY_STATE"
         ):
             console.print(
-                "[yellow]Nenhum anúncio encontrado.[/yellow] Verifique se a busca retorna "
-                "resultados no navegador ou tente novamente com --headful."
+                "[red]RESULT_STATE_UNKNOWN: nenhum anúncio extraído sem confirmação "
+                "de empty state oficial da Meta.[/red]"
             )
             return 1
 
