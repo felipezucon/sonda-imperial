@@ -42,7 +42,7 @@ Ferramentas equivalentes (ex.: actors pagos do Apify) cobram por execução ou p
 3. A primeira página pode incluir anúncios em scripts JSON do HTML; conforme rola, a Ad Library carrega mais resultados via respostas GraphQL. A Sonda lê os dois formatos.
 4. Cada anúncio é normalizado para um schema plano e consistente, pontuado pelo [Índice de Força](#-índice-de-força-pontuação-dos-anúncios), e exportado em **JSON** e **CSV**.
 
-O Collector usa `--headful` nas minerações por keyword: em controles reais, a Meta retornou HTTP 403 e nenhum payload de anúncios ao Chromium headless, enquanto a primeira execução headed recebeu os cards. O monitoring `--total-only` continua headless porque lê apenas o contador e não coleta cards. Respostas HTTP de erro são falhas técnicas, nunca empty state.
+O Collector executa minerações por keyword com Chrome instalado, headed, User-Agent nativo e perfil persistente dedicado em `%LOCALAPPDATA%\RadarCollector\sonda-chrome-mining-profile`. Não utiliza o perfil pessoal. Uma reprodução headed inicial extraiu cards, mas testes posteriores com UA nativo e perfil persistente receberam HTTP 403 da Meta; a origem exata da diferença em relação ao navegador manual não ficou comprovada. O monitoring `--total-only` continua headless, com o contexto e UA existentes, sem perfil. Respostas HTTP de erro são falhas técnicas, nunca empty state.
 
 ## Instalação
 

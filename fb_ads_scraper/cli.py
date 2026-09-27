@@ -44,7 +44,13 @@ def main(argv=None):
     parser.add_argument("--require-complete", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--result-envelope", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--total-only", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--native-user-agent", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--profile-dir", help=argparse.SUPPRESS)
+    parser.add_argument("--browser-channel", choices=["chrome"], help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+
+    if args.total_only and (args.native_user_agent or args.profile_dir or args.browser_channel):
+        parser.error("opções de navegador de mineração não se aplicam ao modo --total-only")
 
     console = Console()
 
@@ -73,6 +79,9 @@ def main(argv=None):
         console=console,
         fail_on_incomplete=args.require_complete,
         total_only=args.total_only,
+        native_user_agent=args.native_user_agent,
+        profile_dir=args.profile_dir,
+        browser_channel=args.browser_channel,
     )
 
     try:

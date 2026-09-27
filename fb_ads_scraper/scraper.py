@@ -1,9 +1,12 @@
 """Núcleo do scraper: Playwright + interceptação das respostas GraphQL."""
 
 import json
+import os
 import re
 import time
 import unicodedata
+from contextlib import contextmanager
+from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 from rich.console import Console
@@ -52,9 +55,41 @@ def has_meta_empty_state(text):
     ))
 
 
+@contextmanager
+def _exclusive_profile(profile_dir):
+    if not profile_dir:
+        yield
+        return
+    profile_dir = Path(profile_dir)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    with (profile_dir / ".sonda.lock").open("a+b") as lock_file:
+        if lock_file.seek(0, os.SEEK_END) == 0:
+            lock_file.write(b"0")
+            lock_file.flush()
+        lock_file.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise RuntimeError("SONDA_PROFILE_IN_USE") from exc
+        try:
+            yield
+        finally:
+            lock_file.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 class AdLibraryScraper:
     def __init__(self, url, max_results=0, headful=False, timeout=600, console=None,
-                 on_progress=None, fail_on_incomplete=False, total_only=False):
+                 on_progress=None, fail_on_incomplete=False, total_only=False,
+                 native_user_agent=False, profile_dir=None, browser_channel=None):
         self.url = url
         self.max_results = max_results
         self.headful = headful
@@ -63,6 +98,9 @@ class AdLibraryScraper:
         self.on_progress = on_progress  # callback(count) para interfaces gráficas
         self.fail_on_incomplete = fail_on_incomplete
         self.total_only = total_only
+        self.native_user_agent = native_user_agent
+        self.profile_dir = profile_dir
+        self.browser_channel = browser_channel
         self.cancel_requested = False   # setar True (de outra thread) interrompe a coleta
         self.raw_ads = {}  # ad_archive_id -> objeto bruto
         self.raw_ads_observed = 0
@@ -180,16 +218,24 @@ class AdLibraryScraper:
 
     def run(self):
         """Executa o scraping e retorna a lista de anúncios normalizados."""
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=not self.headful,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            context = browser.new_context(
-                user_agent=USER_AGENT,
-                locale="pt-BR",
-                viewport={"width": 1440, "height": 900},
-            )
+        with _exclusive_profile(self.profile_dir), sync_playwright() as p:
+            context_options = {"locale": "pt-BR", "viewport": {"width": 1440, "height": 900}}
+            if not self.native_user_agent:
+                context_options["user_agent"] = USER_AGENT
+            if self.profile_dir:
+                context = p.chromium.launch_persistent_context(
+                    str(self.profile_dir), headless=not self.headful,
+                    args=["--disable-blink-features=AutomationControlled"], **context_options,
+                    **({"channel": self.browser_channel} if self.browser_channel else {}),
+                )
+                close_browser = context.close
+            else:
+                browser = p.chromium.launch(
+                    headless=not self.headful,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+                context = browser.new_context(**context_options)
+                close_browser = browser.close
             page = context.new_page()
             page.on("response", self._on_response)
 
@@ -197,11 +243,11 @@ class AdLibraryScraper:
             response = page.goto(self.url, wait_until="domcontentloaded", timeout=90_000)
 
             if response and response.status >= 400:
-                browser.close()
+                close_browser()
                 raise RuntimeError(f"META_HTTP_ERROR: HTTP {response.status}")
 
             if "/login" in page.url or "/checkpoint" in page.url:
-                browser.close()
+                close_browser()
                 raise RuntimeError(
                     "O Facebook redirecionou para uma página de login/verificação. "
                     "Tente novamente mais tarde ou execute com --headful para resolver manualmente."
@@ -224,7 +270,7 @@ class AdLibraryScraper:
                     self.console.print("[red]TOTAL_RESULTS_NOT_FOUND[/red]")
                     raise RuntimeError("TOTAL_RESULTS_NOT_FOUND")
                 finally:
-                    browser.close()
+                    close_browser()
             # Keep the normal load window, but stop it as soon as Meta explicitly
             # reports no matching ads instead of entering the full pagination loop.
             for check in range(16):
@@ -238,7 +284,7 @@ class AdLibraryScraper:
                         else "[yellow]Meta result counter reports zero[/yellow]"
                     )
                     self.console.print("[green]Total results: 0 ({})[/green]".format(self.total_results_source))
-                    browser.close()
+                    close_browser()
                     return []
                 page.wait_for_timeout(250)
             self._read_total_results(page)
@@ -282,7 +328,7 @@ class AdLibraryScraper:
                     last_count = len(self.raw_ads)
 
             self.console.print()  # encerra a linha de progresso
-            browser.close()
+            close_browser()
 
         self.collection_duration_seconds = int(time.monotonic() - start)
 

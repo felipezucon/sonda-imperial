@@ -35,8 +35,11 @@ class _Page:
 
 
 class _Browser:
-    def __init__(self, page): self.page = page; self.closed = False
-    def new_context(self, **_): return type("Context", (), {"new_page": lambda _: self.page})()
+    def __init__(self, page): self.page = page; self.closed = False; self.context_options = []
+    def new_context(self, **options):
+        self.context_options.append(options)
+        return type("Context", (), {"new_page": lambda _: self.page})()
+    def new_page(self): return self.page
     def close(self): self.closed = True
 
 
@@ -44,7 +47,14 @@ class _PlaywrightContext:
     def __init__(self, page): self.page = page
     def __enter__(self):
         self.browser = _Browser(self.page)
-        chromium = type("Chromium", (), {"launch": lambda *_args, **_kwargs: self.browser})()
+        harness = self
+        class Chromium:
+            def launch(self, *_args, **_kwargs): return harness.browser
+            def launch_persistent_context(self, user_data_dir, **options):
+                harness.browser.profile = user_data_dir
+                harness.browser.profile_options = options
+                return harness.browser
+        chromium = Chromium()
         return type("Playwright", (), {"chromium": chromium})()
     def __exit__(self, *_): return False
 
@@ -94,6 +104,64 @@ class PartialResultTests(unittest.TestCase):
         self.assertEqual(scraper.total_results, 15)
         self.assertEqual(scraper.total_results_source, "META_RESULT_COUNTER")
         self.assertEqual(page.scrolls, 0)
+
+    def test_native_user_agent_does_not_override_browser_context(self):
+        page = _Page()
+        context = _PlaywrightContext(page)
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", max_results=1,
+                                   native_user_agent=True)
+        with patch("fb_ads_scraper.scraper.sync_playwright", return_value=context), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+            scraper.run()
+        self.assertNotIn("user_agent", context.browser.context_options[0])
+
+    def test_persistent_profile_is_used_only_when_supplied(self):
+        page = _Page()
+        context = _PlaywrightContext(page)
+        with tempfile.TemporaryDirectory() as profile:
+            scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", max_results=1,
+                                       native_user_agent=True, headful=True, profile_dir=profile,
+                                       browser_channel="chrome")
+            scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+            with patch("fb_ads_scraper.scraper.sync_playwright", return_value=context), \
+                 patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+                scraper.run()
+        self.assertEqual(context.browser.profile, profile)
+        self.assertFalse(context.browser.profile_options["headless"])
+        self.assertNotIn("user_agent", context.browser.profile_options)
+        self.assertEqual(context.browser.profile_options["channel"], "chrome")
+
+    def test_profile_lock_rejects_a_second_process(self):
+        import os
+        import subprocess
+        import sys
+        from fb_ads_scraper.scraper import _exclusive_profile
+        with tempfile.TemporaryDirectory() as directory, _exclusive_profile(directory):
+            command = [sys.executable, "-c", (
+                "from fb_ads_scraper.scraper import _exclusive_profile\n"
+                f"with _exclusive_profile({directory!r}):\n    pass\n"
+            )]
+            result = subprocess.run(command, capture_output=True, text=True, check=False,
+                                    env={**os.environ, "PYTHONPATH": str(Path(__file__).parents[1])})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SONDA_PROFILE_IN_USE", result.stderr)
+
+    def test_total_only_rejects_mining_browser_options(self):
+        with self.assertRaises(SystemExit) as error:
+            main(["https://www.facebook.com/ads/library/", "--total-only",
+                  "--profile-dir", "profile"])
+        self.assertEqual(error.exception.code, 2)
+
+    def test_default_user_agent_override_remains_available_for_monitoring(self):
+        page = _Page()
+        context = _PlaywrightContext(page)
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", total_only=True)
+        with patch("fb_ads_scraper.scraper.sync_playwright", return_value=context):
+            scraper.run()
+        self.assertEqual(context.browser.context_options[0]["user_agent"],
+                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                         "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
     def test_total_only_polls_until_counter_appears(self):
         page = _Page()
