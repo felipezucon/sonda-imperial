@@ -89,12 +89,20 @@ def main(argv=None):
         console.print(f"[red]Erro:[/red] {exc}")
         return 1
 
-    if not ads and not args.allow_empty and not args.total_only:
-        console.print(
-            "[yellow]Nenhum anúncio encontrado.[/yellow] Verifique se a busca retorna "
-            "resultados no navegador ou tente novamente com --headful."
-        )
-        return 1
+    if not ads and not args.total_only:
+        if scraper.total_results is not None and scraper.total_results > 0:
+            console.print("[red]ADS_EXTRACTION_FAILED[/red]")
+            return 1
+        if (
+            not args.allow_empty
+            and not getattr(scraper, "empty_state_detected", False)
+            and scraper.total_results != 0
+        ):
+            console.print(
+                "[yellow]Nenhum anúncio encontrado.[/yellow] Verifique se a busca retorna "
+                "resultados no navegador ou tente novamente com --headful."
+            )
+            return 1
 
     if args.result_envelope:
         advertisers = {

@@ -3,6 +3,7 @@
 import json
 import re
 import time
+import unicodedata
 
 from playwright.sync_api import sync_playwright
 from rich.console import Console
@@ -41,6 +42,16 @@ def parse_total_results(text):
     return None
 
 
+def has_meta_empty_state(text):
+    normalized = unicodedata.normalize("NFKD", text or "")
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    normalized = " ".join(normalized.casefold().split())
+    return bool(re.search(
+        r"\bnenhum anuncio corresponde aos seus criterios de pesquisa\b",
+        normalized,
+    ))
+
+
 class AdLibraryScraper:
     def __init__(self, url, max_results=0, headful=False, timeout=600, console=None,
                  on_progress=None, fail_on_incomplete=False, total_only=False):
@@ -60,6 +71,7 @@ class AdLibraryScraper:
         self.collection_duration_seconds = 0
         self.total_results = None
         self.total_results_source = None
+        self.empty_state_detected = False
 
     # ------------------------------------------------------------------
     # Ingestão de payloads
@@ -142,6 +154,13 @@ class AdLibraryScraper:
         if self.total_results is not None:
             self.total_results_source = "META_RESULT_COUNTER"
             return True
+        if has_meta_empty_state(text):
+            self.raw_ads.clear()
+            self.raw_ads_observed = 0
+            self.total_results = 0
+            self.total_results_source = "META_EMPTY_STATE"
+            self.empty_state_detected = True
+            return True
         return False
 
     def _report_progress(self):
@@ -192,6 +211,8 @@ class AdLibraryScraper:
                     while time.monotonic() < deadline:
                         if self._read_total_results(page, timeout=1000):
                             self.collection_duration_seconds = int(time.monotonic() - start)
+                            if self.empty_state_detected:
+                                self.console.print("[yellow]Meta empty state detected[/yellow]")
                             self.console.print(f"[green]Total results: {self.total_results} ({self.total_results_source})[/green]")
                             return []
                         page.wait_for_timeout(250)
@@ -200,7 +221,22 @@ class AdLibraryScraper:
                     raise RuntimeError("TOTAL_RESULTS_NOT_FOUND")
                 finally:
                     browser.close()
-            page.wait_for_timeout(4000)
+            # Keep the normal load window, but stop it as soon as Meta explicitly
+            # reports no matching ads instead of entering the full pagination loop.
+            for check in range(16):
+                if self._read_total_results(page, timeout=250) and (
+                    self.empty_state_detected or self.total_results == 0
+                ):
+                    self.collection_duration_seconds = (check + 1) // 4
+                    self.console.print(
+                        "[yellow]Meta empty state detected[/yellow]"
+                        if self.empty_state_detected
+                        else "[yellow]Meta result counter reports zero[/yellow]"
+                    )
+                    self.console.print("[green]Total results: 0 ({})[/green]".format(self.total_results_source))
+                    browser.close()
+                    return []
+                page.wait_for_timeout(250)
             self._read_total_results(page)
             self._ingest_initial_html(page)
             self._report_progress()
