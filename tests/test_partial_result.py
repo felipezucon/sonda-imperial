@@ -1,5 +1,7 @@
 import unittest
 import json
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -46,6 +48,15 @@ class _PlaywrightContext:
 
 
 class PartialResultTests(unittest.TestCase):
+    def test_module_propagates_cli_exit_code(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "fb_ads_scraper"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+
     def test_total_results_counter(self):
         self.assertEqual(parse_total_results("Biblioteca\n~15 resultados\nFiltros"), 15)
         self.assertEqual(parse_total_results("1.234 resultados"), 1234)
