@@ -13,6 +13,8 @@ class _Page:
 
     def __init__(self, error=None):
         self.error = error
+        self.reads = []
+        self.scrolls = 0
 
     def on(self, *_): pass
     def goto(self, *_, **__): pass
@@ -20,11 +22,13 @@ class _Page:
     def wait_for_timeout(self, *_): pass
 
     def evaluate(self, *_):
+        self.scrolls += 1
         if self.error:
             raise self.error
 
     def locator(self, *_):
-        return type("Locator", (), {"inner_text": lambda *_args, **_kwargs: "~15 resultados"})()
+        page = self
+        return type("Locator", (), {"inner_text": lambda *_args, **_kwargs: page.reads.pop(0) if page.reads else "~15 resultados"})()
 
 
 class _Browser:
@@ -46,6 +50,35 @@ class PartialResultTests(unittest.TestCase):
         self.assertEqual(parse_total_results("Biblioteca\n~15 resultados\nFiltros"), 15)
         self.assertEqual(parse_total_results("1.234 resultados"), 1234)
         self.assertIsNone(parse_total_results("3 anúncios observados"))
+
+    def test_total_only_reads_counter_and_skips_pagination(self):
+        page = _Page()
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", total_only=True)
+        with patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)):
+            self.assertEqual(scraper.run(), [])
+        self.assertEqual(scraper.total_results, 15)
+        self.assertEqual(scraper.total_results_source, "META_RESULT_COUNTER")
+        self.assertEqual(page.scrolls, 0)
+
+    def test_total_only_polls_until_counter_appears(self):
+        page = _Page()
+        page.reads = ["Carregando", "", "15 resultados"]
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", total_only=True)
+        with patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)):
+            self.assertEqual(scraper.run(), [])
+        self.assertEqual(scraper.total_results, 15)
+        self.assertEqual(page.scrolls, 0)
+
+    def test_total_only_fails_without_counter_and_never_scrolls(self):
+        page = _Page()
+        page.reads = ["Carregando"] * 100
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", total_only=True)
+        with patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)), \
+             patch("fb_ads_scraper.scraper.time.monotonic", side_effect=[0, *([1] * 15), 16, 16]):
+            with self.assertRaisesRegex(RuntimeError, "TOTAL_RESULTS_NOT_FOUND"):
+                scraper.run()
+        self.assertIsNone(scraper.total_results)
+        self.assertEqual(page.scrolls, 0)
     def _scraper(self, timeout=3600):
         scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", timeout=timeout)
         scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}

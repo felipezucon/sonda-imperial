@@ -43,7 +43,7 @@ def parse_total_results(text):
 
 class AdLibraryScraper:
     def __init__(self, url, max_results=0, headful=False, timeout=600, console=None,
-                 on_progress=None, fail_on_incomplete=False):
+                 on_progress=None, fail_on_incomplete=False, total_only=False):
         self.url = url
         self.max_results = max_results
         self.headful = headful
@@ -51,6 +51,7 @@ class AdLibraryScraper:
         self.console = console or Console()
         self.on_progress = on_progress  # callback(count) para interfaces gráficas
         self.fail_on_incomplete = fail_on_incomplete
+        self.total_only = total_only
         self.cancel_requested = False   # setar True (de outra thread) interrompe a coleta
         self.raw_ads = {}  # ad_archive_id -> objeto bruto
         self.raw_ads_observed = 0
@@ -132,14 +133,16 @@ class AdLibraryScraper:
         except Exception:
             pass  # banner não apareceu
 
-    def _read_total_results(self, page):
+    def _read_total_results(self, page, timeout=10_000):
         try:
-            text = page.locator("body").inner_text(timeout=10_000)
+            text = page.locator("body").inner_text(timeout=timeout)
         except Exception:
             return
         self.total_results = parse_total_results(text)
         if self.total_results is not None:
             self.total_results_source = "META_RESULT_COUNTER"
+            return True
+        return False
 
     def _report_progress(self):
         count = len(self.raw_ads)
@@ -182,6 +185,21 @@ class AdLibraryScraper:
                 )
 
             self._dismiss_cookie_banner(page)
+            if self.total_only:
+                start = time.monotonic()
+                deadline = start + 15
+                try:
+                    while time.monotonic() < deadline:
+                        if self._read_total_results(page, timeout=1000):
+                            self.collection_duration_seconds = int(time.monotonic() - start)
+                            self.console.print(f"[green]Total results: {self.total_results} ({self.total_results_source})[/green]")
+                            return []
+                        page.wait_for_timeout(250)
+                    self.collection_duration_seconds = int(time.monotonic() - start)
+                    self.console.print("[red]TOTAL_RESULTS_NOT_FOUND[/red]")
+                    raise RuntimeError("TOTAL_RESULTS_NOT_FOUND")
+                finally:
+                    browser.close()
             page.wait_for_timeout(4000)
             self._read_total_results(page)
             self._ingest_initial_html(page)
