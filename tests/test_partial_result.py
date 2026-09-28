@@ -23,17 +23,31 @@ class _Page:
         self.button_metadata = []
         self.buttons = []
         self.closed = False
+        self.script_scans = 0
+        self.height = 1000
+        self.at_bottom = True
+        self.on_wait = None
+        self.on_scroll = None
 
     def on(self, *_): pass
     def goto(self, *_, **__): pass
     def close(self): self.closed = True
-    def eval_on_selector_all(self, *_): return []
-    def wait_for_timeout(self, *_): pass
+    def eval_on_selector_all(self, *_): self.script_scans += 1; return []
+    def wait_for_timeout(self, milliseconds):
+        if self.on_wait and self.scrolls:
+            self.on_wait(milliseconds)
 
-    def evaluate(self, *_):
-        self.scrolls += 1
+    def evaluate(self, script, *_):
         if self.error:
             raise self.error
+        if "scrollTo" in script:
+            self.scrolls += 1
+            if self.on_scroll:
+                self.on_scroll()
+            return None
+        if "scrollHeight" in script:
+            return {"height": self.height, "atBottom": self.at_bottom}
+        return None
 
     def locator(self, *_):
         page = self
@@ -50,6 +64,12 @@ class _LoadMoreButton:
     def click(self, **_):
         self.clicks += 1
         if self.click_action: self.click_action()
+
+
+class _Clock:
+    def __init__(self): self.value = 0.0
+    def monotonic(self): return self.value
+    def advance(self, milliseconds): self.value += milliseconds / 1000
 
 
 class _Browser:
@@ -275,7 +295,7 @@ class PartialResultTests(unittest.TestCase):
 
         def delayed_growth(milliseconds):
             waits.append(milliseconds)
-            if len(waits) > 16:
+            if page.scrolls and len(waits) > 2:
                 scraper.raw_ads["ad-2"] = {"ad_archive_id": "ad-2"}
 
         page.wait_for_timeout = delayed_growth
@@ -286,6 +306,176 @@ class PartialResultTests(unittest.TestCase):
         self.assertEqual(len(ads), 2)
         self.assertGreater(len(waits), 0)
         self.assertEqual(page.scrolls, 1)
+
+    def test_ids_growing_during_observation_prevent_end_detection(self):
+        clock = _Clock()
+        page = _Page()
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", max_results=2)
+        scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+        scraper.raw_ads_observed = 1
+
+        def add_ad(milliseconds):
+            clock.advance(milliseconds)
+            if clock.value >= 0.25:
+                scraper.raw_ads["ad-2"] = {"ad_archive_id": "ad-2"}
+
+        page.on_wait = add_ad
+        with patch("fb_ads_scraper.scraper.time.monotonic", side_effect=clock.monotonic), \
+             patch("fb_ads_scraper.scraper.PAGINATION_OBSERVE_SECONDS", 1), \
+             patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            self.assertEqual(len(scraper.run()), 2)
+        self.assertTrue(scraper.complete)
+        self.assertEqual(page.scrolls, 1)
+
+    def test_scroll_height_growth_resets_idle_and_delays_finish(self):
+        clock = _Clock()
+        page = _Page()
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/")
+        scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+        scraper.raw_ads_observed = 1
+        waits = 0
+
+        def grow_then_settle(milliseconds):
+            nonlocal waits
+            clock.advance(milliseconds)
+            waits += 1
+            if waits in (4, 8, 12):
+                page.height += 100
+
+        page.on_wait = grow_then_settle
+        with patch("fb_ads_scraper.scraper.time.monotonic", side_effect=clock.monotonic), \
+             patch("fb_ads_scraper.scraper.PAGINATION_OBSERVE_SECONDS", 1), \
+             patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            scraper.run()
+        self.assertTrue(scraper.complete)
+        self.assertGreaterEqual(clock.value, 18)
+
+    def test_bottom_with_stable_ids_and_height_waits_full_idle_period(self):
+        clock = _Clock()
+        page = _Page()
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/")
+        scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+        scraper.raw_ads_observed = 1
+        page.on_wait = clock.advance
+        with patch("fb_ads_scraper.scraper.time.monotonic", side_effect=clock.monotonic), \
+             patch("fb_ads_scraper.scraper.PAGINATION_OBSERVE_SECONDS", 1), \
+             patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            scraper.run()
+        self.assertEqual(clock.value, 15)
+        self.assertTrue(scraper.complete)
+        self.assertIsNone(scraper.stop_reason)
+
+    def test_idle_without_bottom_confirmation_does_not_use_end_of_results(self):
+        clock = _Clock()
+        page = _Page()
+        page.at_bottom = False
+        page.default_body = "1 resultado"
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/")
+        scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+        scraper.raw_ads_observed = 1
+        messages = []
+        page.on_wait = clock.advance
+        with patch("fb_ads_scraper.scraper.time.monotonic", side_effect=clock.monotonic), \
+             patch("fb_ads_scraper.scraper.PAGINATION_OBSERVE_SECONDS", 1), \
+             patch("fb_ads_scraper.scraper.MAX_STAGNANT_SCROLLS", 2), \
+             patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            scraper.console = SimpleNamespace(print=lambda *parts, **_: messages.append(" ".join(map(str, parts))))
+            scraper.run()
+        self.assertNotIn("END_OF_RESULTS", " ".join(messages))
+        self.assertEqual(scraper.stop_reason, None)
+
+    def test_load_more_progress_resets_idle_clock(self):
+        clock = _Clock()
+        page = _Page()
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/")
+        scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+        scraper.raw_ads_observed = 1
+        page.button_metadata = [{"index": 0, "name": "ver mais", "visible": True,
+                                 "enabled": True, "inDialog": False, "inArticle": False,
+                                 "afterLastAd": True, "nearBottom": True, "pageAtBottom": True}]
+
+        def load_more():
+            page.height += 100
+            page.button_metadata.clear()
+
+        button = _LoadMoreButton(load_more)
+        page.buttons = [button]
+        page.on_wait = clock.advance
+        with patch("fb_ads_scraper.scraper.time.monotonic", side_effect=clock.monotonic), \
+             patch("fb_ads_scraper.scraper.PAGINATION_OBSERVE_SECONDS", 1), \
+             patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            scraper.run()
+        self.assertEqual(button.clicks, 1)
+        self.assertGreaterEqual(clock.value, 16)
+        self.assertTrue(scraper.complete)
+
+    def test_load_more_without_progress_does_not_block_idle_finish(self):
+        clock = _Clock()
+        page = _Page()
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/")
+        scraper.total_results = 2000
+        scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+        scraper.raw_ads_observed = 1
+        page.button_metadata = [{"index": 0, "name": "ver mais", "visible": True,
+                                 "enabled": True, "inDialog": False, "inArticle": False,
+                                 "afterLastAd": True, "nearBottom": True, "pageAtBottom": True}]
+        button = _LoadMoreButton()
+        page.buttons = [button]
+        page.on_wait = clock.advance
+        with patch("fb_ads_scraper.scraper.time.monotonic", side_effect=clock.monotonic), \
+             patch("fb_ads_scraper.scraper.PAGINATION_OBSERVE_SECONDS", 1), \
+             patch("fb_ads_scraper.scraper.LOAD_MORE_WAIT_SECONDS", 1), \
+             patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            scraper.run()
+        self.assertEqual(button.clicks, 2)
+        self.assertGreaterEqual(clock.value, 15)
+        self.assertTrue(scraper.complete)
+        self.assertIsNone(scraper.stop_reason)
+
+    def test_progress_at_fourteen_seconds_restarts_idle_period(self):
+        clock = _Clock()
+        page = _Page()
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/")
+        scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+        scraper.raw_ads_observed = 1
+        grew = False
+
+        def late_growth(milliseconds):
+            nonlocal grew
+            clock.advance(milliseconds)
+            if not grew and clock.value >= 14:
+                page.height += 100
+                grew = True
+
+        page.on_wait = late_growth
+        with patch("fb_ads_scraper.scraper.time.monotonic", side_effect=clock.monotonic), \
+             patch("fb_ads_scraper.scraper.PAGINATION_OBSERVE_SECONDS", 1), \
+             patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            scraper.run()
+        self.assertTrue(grew)
+        self.assertGreaterEqual(clock.value, 29)
+        self.assertTrue(scraper.complete)
+
+    def test_pagination_html_scripts_are_scanned_only_for_bootstrap(self):
+        clock = _Clock()
+        page = _Page()
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/")
+        scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+        scraper.raw_ads_observed = 1
+        page.on_wait = clock.advance
+        with patch("fb_ads_scraper.scraper.time.monotonic", side_effect=clock.monotonic), \
+             patch("fb_ads_scraper.scraper.PAGINATION_OBSERVE_SECONDS", 1), \
+             patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            scraper.run()
+        self.assertEqual(page.script_scans, 1)
 
     def test_repeated_load_more_without_growth_falls_back_to_stability_logic(self):
         page = _Page()

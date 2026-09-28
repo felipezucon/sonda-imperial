@@ -31,6 +31,8 @@ LOAD_MORE_NO_PROGRESS_LIMIT = 2
 LOAD_MORE_WAIT_SECONDS = 8
 PAGINATION_OBSERVE_SECONDS = 3
 PAGINATION_POLL_MS = 250
+PAGINATION_IDLE_FINISH_SECONDS = 15
+PAGINATION_BUTTON_CHECK_SECONDS = 1
 LOAD_MORE_LABELS = {"ver mais", "ver mais anuncios", "see more", "load more"}
 TOTAL_RESULTS_RE = re.compile(
     r"^\s*[~≈]?\s*([\d\s.,]+)\s+(?:resultados?|results?)\s*$",
@@ -98,6 +100,16 @@ def _find_global_load_more(page):
         return None
     item = matches[0]
     return page.locator('button,[role="button"]').nth(item["index"])
+
+
+def _pagination_state(page):
+    try:
+        return page.evaluate("""() => {
+          const height = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight);
+          return {height, atBottom: window.scrollY + window.innerHeight >= height - 8};
+        }""") or {"height": 0, "atBottom": False}
+    except Exception:
+        return {"height": 0, "atBottom": False}
 
 
 @contextmanager
@@ -362,7 +374,10 @@ class AdLibraryScraper:
             load_more_no_progress = 0
             scroll_cycles = 0
             start = time.monotonic()
+            last_progress_at = start
+            last_height_change_at = start
             last_count = len(self.raw_ads)
+            last_height = _pagination_state(page)["height"]
 
             while not self._reached_limit():
                 if self.cancel_requested:
@@ -388,77 +403,127 @@ class AdLibraryScraper:
                     raise RuntimeError(f"falha durante paginação: {exc}") from exc
                 scroll_cycles += 1
 
-                # Let lazy/infinite loading deliver updates before another scroll.
-                # Observe the global button during the window, but click it only
-                # if the primary signal (new unique ads) did not arrive.
+                # Response events ingest GraphQL ads; the embedded HTML is a one-time bootstrap.
                 observe_deadline = time.monotonic() + PAGINATION_OBSERVE_SECONDS
+                next_button_check = time.monotonic()
+                button = None
+                cycle_progress = False
+                cycle_start_count, cycle_start_height = last_count, last_height
                 while True:
-                    self._ingest_initial_html(page)
-                    if len(self.raw_ads) > last_count:
-                        break
-                    _find_global_load_more(page)
-                    remaining = observe_deadline - time.monotonic()
+                    now = time.monotonic()
+                    height = _pagination_state(page)["height"]
+                    count = len(self.raw_ads)
+                    ids_grew = count > last_count
+                    if height != last_height:
+                        last_height_change_at = now
+                    if count > last_count or height > last_height:
+                        last_count, last_height = count, height
+                        last_progress_at = now
+                        stagnant = 0
+                        load_more_no_progress = 0
+                        cycle_progress = True
+                        if ids_grew:
+                            break
+                    elif height < last_height:
+                        last_height = height
+                    if now >= next_button_check:
+                        button = _find_global_load_more(page)
+                        next_button_check = now + PAGINATION_BUTTON_CHECK_SECONDS
+                    remaining = observe_deadline - now
                     if remaining <= 0:
                         break
                     page.wait_for_timeout(min(PAGINATION_POLL_MS, max(1, int(remaining * 1000))))
 
-                if len(self.raw_ads) > last_count:
-                    self.console.print(
-                        f"scroll cycle {scroll_cycles}: ads {last_count} -> {len(self.raw_ads)}"
-                    )
+                height = _pagination_state(page)["height"]
+                count = len(self.raw_ads)
+                now = time.monotonic()
+                if height != last_height:
+                    last_height_change_at = now
+                if count > last_count or height > last_height:
+                    last_count, last_height = count, height
+                    last_progress_at = now
                     stagnant = 0
                     load_more_no_progress = 0
-                    last_count = len(self.raw_ads)
+                    cycle_progress = True
+                elif height < last_height:
+                    last_height = height
+
+                if cycle_progress:
+                    self.console.print(
+                        f"[pagination] progress unique={cycle_start_count}->{last_count} "
+                        f"height={cycle_start_height}->{last_height}"
+                    )
                     continue
 
-                if len(self.raw_ads) == last_count:
-                    button = _find_global_load_more(page)
-                    if button and load_more_no_progress < LOAD_MORE_NO_PROGRESS_LIMIT:
-                        self.console.print(f"load more detected: scroll cycle {scroll_cycles}")
-                        before_click = len(self.raw_ads)
-                        try:
-                            button.click(timeout=3000)
-                            self.console.print("load more clicked")
-                        except Exception as exc:
-                            self.console.print(f"load more click failed: {type(exc).__name__}")
-                        deadline = time.monotonic() + LOAD_MORE_WAIT_SECONDS
-                        while len(self.raw_ads) <= before_click and time.monotonic() < deadline:
-                            self._ingest_initial_html(page)
-                            page.wait_for_timeout(250)
-                        if len(self.raw_ads) > before_click:
+                if button and load_more_no_progress < LOAD_MORE_NO_PROGRESS_LIMIT:
+                    load_more_progress = False
+                    self.console.print(f"load more detected: scroll cycle {scroll_cycles}")
+                    try:
+                        button.click(timeout=3000)
+                        self.console.print("load more clicked")
+                    except Exception as exc:
+                        self.console.print(f"load more click failed: {type(exc).__name__}")
+                    deadline = time.monotonic() + LOAD_MORE_WAIT_SECONDS
+                    while time.monotonic() < deadline:
+                        now = time.monotonic()
+                        height = _pagination_state(page)["height"]
+                        count = len(self.raw_ads)
+                        if height != last_height:
+                            last_height_change_at = now
+                        if count > last_count or height > last_height:
                             self.console.print(
-                                f"load more ads: {before_click} -> {len(self.raw_ads)}"
+                                f"[pagination] progress unique={last_count}->{count} "
+                                f"height={last_height}->{height}"
                             )
-                            last_count = len(self.raw_ads)
+                            last_count, last_height = count, height
+                            last_progress_at = now
                             stagnant = 0
                             load_more_no_progress = 0
-                            continue
+                            load_more_progress = True
+                            break
+                        if height < last_height:
+                            last_height = height
+                        page.wait_for_timeout(PAGINATION_POLL_MS)
+                    else:
                         load_more_no_progress += 1
                         self.console.print(
                             f"load more made no progress ({load_more_no_progress}/"
                             f"{LOAD_MORE_NO_PROGRESS_LIMIT})"
                         )
-                    else:
-                        if not button:
-                            load_more_no_progress = 0
-                    stagnant += 1
-                    if stagnant >= MAX_STAGNANT_SCROLLS:
-                        scale_gap = (self.total_results is not None and self.total_results > 0
-                                     and self.total_results > max(len(self.raw_ads) * 2,
-                                                                  len(self.raw_ads) + 10))
-                        if scale_gap:
-                            self.complete = False
-                            self.stop_reason = "PAGINATION_STALLED"
-                            if self.fail_on_incomplete:
-                                raise RuntimeError(self.stop_reason)
-                        break
-                else:
+                    if load_more_progress:
+                        continue
+
+                state = _pagination_state(page)
+                button = _find_global_load_more(page)
+                idle_seconds = time.monotonic() - last_progress_at
+                load_more_available = bool(button) and load_more_no_progress < LOAD_MORE_NO_PROGRESS_LIMIT
+                if scroll_cycles % 5 == 0:
                     self.console.print(
-                        f"scroll cycle {scroll_cycles}: ads {last_count} -> {len(self.raw_ads)}"
+                        f"[pagination] cycle={scroll_cycles} unique={len(self.raw_ads)} "
+                        f"height={state['height']} atBottom={state['atBottom']} "
+                        f"idle={int(idle_seconds)}s"
                     )
-                    stagnant = 0
-                    load_more_no_progress = 0
-                    last_count = len(self.raw_ads)
+                if (state["atBottom"] and len(self.raw_ads) == last_count
+                        and state["height"] == last_height and not load_more_available
+                        and time.monotonic() - last_height_change_at >= PAGINATION_IDLE_FINISH_SECONDS
+                        and idle_seconds >= PAGINATION_IDLE_FINISH_SECONDS):
+                    self.console.print(
+                        f"[pagination] finished reason=END_OF_RESULTS unique={len(self.raw_ads)} "
+                        f"idle={int(idle_seconds)}s"
+                    )
+                    break
+
+                stagnant += 1
+                if stagnant >= MAX_STAGNANT_SCROLLS:
+                    scale_gap = (self.total_results is not None and self.total_results > 0
+                                 and self.total_results > max(len(self.raw_ads) * 2,
+                                                              len(self.raw_ads) + 10))
+                    if scale_gap:
+                        self.complete = False
+                        self.stop_reason = "PAGINATION_STALLED"
+                        if self.fail_on_incomplete:
+                            raise RuntimeError(self.stop_reason)
+                    break
 
             self.console.print()  # encerra a linha de progresso
             close_browser()
