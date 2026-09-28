@@ -42,7 +42,7 @@ Ferramentas equivalentes (ex.: actors pagos do Apify) cobram por execução ou p
 3. A primeira página pode incluir anúncios em scripts JSON do HTML; conforme rola, a Ad Library carrega mais resultados via respostas GraphQL. A Sonda lê os dois formatos.
 4. Cada anúncio é normalizado para um schema plano e consistente, pontuado pelo [Índice de Força](#-índice-de-força-pontuação-dos-anúncios), e exportado em **JSON** e **CSV**.
 
-O Collector executa minerações por keyword com Chrome instalado, headed, User-Agent nativo e perfil persistente dedicado em `%LOCALAPPDATA%\RadarCollector\sonda-chrome-mining-profile`. Não utiliza o perfil pessoal. Uma reprodução headed inicial extraiu cards, mas testes posteriores com UA nativo e perfil persistente receberam HTTP 403 da Meta; a origem exata da diferença em relação ao navegador manual não ficou comprovada. O monitoring `--total-only` continua headless, com o contexto e UA existentes, sem perfil. Respostas HTTP de erro são falhas técnicas, nunca empty state.
+O Collector inicia o Brave instalado como processo headed com um perfil persistente dedicado e depuração remota restrita a `127.0.0.1`; a Sonda conecta via CDP ao contexto existente, sem sobrescrever o User-Agent. O perfil fica fora do repositório e não usa dados pessoais. Monitoring `--total-only` continua headless e não usa CDP nem o perfil de mining. Respostas HTTP de erro são falhas técnicas, nunca empty state.
 
 ## Instalação
 

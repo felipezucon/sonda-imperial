@@ -27,6 +27,11 @@ COOKIE_BUTTON_RE = re.compile(
 
 # Quantas rolagens consecutivas sem anúncios novos indicam fim da lista
 MAX_STAGNANT_SCROLLS = 60
+LOAD_MORE_NO_PROGRESS_LIMIT = 2
+LOAD_MORE_WAIT_SECONDS = 8
+PAGINATION_OBSERVE_SECONDS = 3
+PAGINATION_POLL_MS = 250
+LOAD_MORE_LABELS = {"ver mais", "ver mais anuncios", "see more", "load more"}
 TOTAL_RESULTS_RE = re.compile(
     r"^\s*[~≈]?\s*([\d\s.,]+)\s+(?:resultados?|results?)\s*$",
     re.IGNORECASE,
@@ -53,6 +58,46 @@ def has_meta_empty_state(text):
         r"\bnenhum anuncio corresponde aos seus criterios de pesquisa\b",
         normalized,
     ))
+
+
+def _find_global_load_more(page):
+    buttons = page.locator('button,[role="button"]').evaluate_all(r"""
+        els => {
+          const items = els.map((el, index) => {
+            const style = getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            const name = (el.getAttribute('aria-label') || el.innerText || el.value || '')
+              .normalize('NFKC').replace(/[\u200B\uFEFF]/g, '').normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+            return {
+              index, name,
+              visible: style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0,
+              enabled: !el.disabled && el.getAttribute('aria-disabled') !== 'true',
+              inDialog: !!el.closest('[role="dialog"],dialog'),
+              inArticle: !!el.closest('article,[role="article"]'),
+              nearBottom: rect.top >= window.innerHeight * 0.5,
+              pageAtBottom: window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 8
+            };
+          });
+          const adActions = items.filter(button =>
+            button.visible && /^(ver detalhes do anuncio|see ad details|view ad details)$/i.test(button.name)
+          );
+          const lastAdAction = adActions.length ? els[adActions[adActions.length - 1].index] : null;
+          return items.map((item, index) => {
+            item.afterLastAd = !!lastAdAction &&
+              !!(lastAdAction.compareDocumentPosition(els[index]) & Node.DOCUMENT_POSITION_FOLLOWING);
+            return item;
+          });
+        }
+    """)
+    matches = [item for item in buttons if item["name"] in LOAD_MORE_LABELS
+               and item["visible"] and item["enabled"] and not item["inDialog"]
+               and not item["inArticle"] and item["afterLastAd"] and item["nearBottom"]
+               and item["pageAtBottom"]]
+    if len(matches) != 1:
+        return None
+    item = matches[0]
+    return page.locator('button,[role="button"]').nth(item["index"])
 
 
 @contextmanager
@@ -89,7 +134,8 @@ def _exclusive_profile(profile_dir):
 class AdLibraryScraper:
     def __init__(self, url, max_results=0, headful=False, timeout=600, console=None,
                  on_progress=None, fail_on_incomplete=False, total_only=False,
-                 native_user_agent=False, profile_dir=None, browser_channel=None):
+                 native_user_agent=False, profile_dir=None, browser_channel=None,
+                 cdp_endpoint=None):
         self.url = url
         self.max_results = max_results
         self.headful = headful
@@ -101,6 +147,7 @@ class AdLibraryScraper:
         self.native_user_agent = native_user_agent
         self.profile_dir = profile_dir
         self.browser_channel = browser_channel
+        self.cdp_endpoint = cdp_endpoint
         self.cancel_requested = False   # setar True (de outra thread) interrompe a coleta
         self.raw_ads = {}  # ad_archive_id -> objeto bruto
         self.raw_ads_observed = 0
@@ -219,24 +266,47 @@ class AdLibraryScraper:
     def run(self):
         """Executa o scraping e retorna a lista de anúncios normalizados."""
         with _exclusive_profile(self.profile_dir), sync_playwright() as p:
-            context_options = {"locale": "pt-BR", "viewport": {"width": 1440, "height": 900}}
-            if not self.native_user_agent:
-                context_options["user_agent"] = USER_AGENT
-            if self.profile_dir:
-                context = p.chromium.launch_persistent_context(
-                    str(self.profile_dir), headless=not self.headful,
-                    args=["--disable-blink-features=AutomationControlled"], **context_options,
-                    **({"channel": self.browser_channel} if self.browser_channel else {}),
-                )
-                close_browser = context.close
+            if self.cdp_endpoint:
+                try:
+                    browser = p.chromium.connect_over_cdp(self.cdp_endpoint, timeout=10_000)
+                except Exception as exc:
+                    raise RuntimeError(f"SONDA_CDP_CONNECT_FAILED: {exc}") from exc
+                if not browser.contexts:
+                    browser.close()
+                    raise RuntimeError("SONDA_CDP_CONTEXT_UNAVAILABLE")
+                context = browser.contexts[0]
+                disconnect_browser = True
             else:
-                browser = p.chromium.launch(
-                    headless=not self.headful,
-                    args=["--disable-blink-features=AutomationControlled"],
-                )
-                context = browser.new_context(**context_options)
-                close_browser = browser.close
+                context_options = {"locale": "pt-BR", "viewport": {"width": 1440, "height": 900}}
+                if not self.native_user_agent:
+                    context_options["user_agent"] = USER_AGENT
+                if self.profile_dir:
+                    context = p.chromium.launch_persistent_context(
+                        str(self.profile_dir), headless=not self.headful,
+                        args=["--disable-blink-features=AutomationControlled"], **context_options,
+                        **({"channel": self.browser_channel} if self.browser_channel else {}),
+                    )
+                    browser = None
+                else:
+                    browser = p.chromium.launch(
+                        headless=not self.headful,
+                        args=["--disable-blink-features=AutomationControlled"],
+                    )
+                    context = browser.new_context(**context_options)
+                disconnect_browser = False
             page = context.new_page()
+
+            def close_browser():
+                try:
+                    page.close()
+                finally:
+                    if disconnect_browser:
+                        browser.close()
+                    elif browser:
+                        browser.close()
+                    else:
+                        context.close()
+
             page.on("response", self._on_response)
 
             self.console.print(f"Abrindo: [dim]{self.url}[/dim]")
@@ -292,6 +362,8 @@ class AdLibraryScraper:
             self._report_progress()
 
             stagnant = 0
+            load_more_no_progress = 0
+            scroll_cycles = 0
             start = time.monotonic()
             last_count = len(self.raw_ads)
 
@@ -317,14 +389,78 @@ class AdLibraryScraper:
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 except Exception as exc:
                     raise RuntimeError(f"falha durante paginação: {exc}") from exc
-                page.wait_for_timeout(1500)
+                scroll_cycles += 1
+
+                # Let lazy/infinite loading deliver updates before another scroll.
+                # Observe the global button during the window, but click it only
+                # if the primary signal (new unique ads) did not arrive.
+                observe_deadline = time.monotonic() + PAGINATION_OBSERVE_SECONDS
+                while True:
+                    self._ingest_initial_html(page)
+                    if len(self.raw_ads) > last_count:
+                        break
+                    _find_global_load_more(page)
+                    remaining = observe_deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    page.wait_for_timeout(min(PAGINATION_POLL_MS, max(1, int(remaining * 1000))))
+
+                if len(self.raw_ads) > last_count:
+                    self.console.print(
+                        f"scroll cycle {scroll_cycles}: ads {last_count} -> {len(self.raw_ads)}"
+                    )
+                    stagnant = 0
+                    load_more_no_progress = 0
+                    last_count = len(self.raw_ads)
+                    continue
 
                 if len(self.raw_ads) == last_count:
+                    button = _find_global_load_more(page)
+                    if button and load_more_no_progress < LOAD_MORE_NO_PROGRESS_LIMIT:
+                        self.console.print(f"load more detected: scroll cycle {scroll_cycles}")
+                        before_click = len(self.raw_ads)
+                        try:
+                            button.click(timeout=3000)
+                            self.console.print("load more clicked")
+                        except Exception as exc:
+                            self.console.print(f"load more click failed: {type(exc).__name__}")
+                        deadline = time.monotonic() + LOAD_MORE_WAIT_SECONDS
+                        while len(self.raw_ads) <= before_click and time.monotonic() < deadline:
+                            self._ingest_initial_html(page)
+                            page.wait_for_timeout(250)
+                        if len(self.raw_ads) > before_click:
+                            self.console.print(
+                                f"load more ads: {before_click} -> {len(self.raw_ads)}"
+                            )
+                            last_count = len(self.raw_ads)
+                            stagnant = 0
+                            load_more_no_progress = 0
+                            continue
+                        load_more_no_progress += 1
+                        self.console.print(
+                            f"load more made no progress ({load_more_no_progress}/"
+                            f"{LOAD_MORE_NO_PROGRESS_LIMIT})"
+                        )
+                    else:
+                        if not button:
+                            load_more_no_progress = 0
                     stagnant += 1
                     if stagnant >= MAX_STAGNANT_SCROLLS:
-                        break  # fim da lista
+                        scale_gap = (self.total_results is not None and self.total_results > 0
+                                     and self.total_results > max(len(self.raw_ads) * 2,
+                                                                  len(self.raw_ads) + 10))
+                        if scale_gap:
+                            self.complete = False
+                            self.stop_reason = "PAGINATION_STALLED"
+                            if self.fail_on_incomplete:
+                                raise RuntimeError(self.stop_reason)
+                        break
                 else:
+                    self.console.print(
+                        f"scroll cycle {scroll_cycles}: ads {last_count} -> {len(self.raw_ads)}"
+                    )
                     stagnant = 0
+                    load_more_no_progress = 0
                     last_count = len(self.raw_ads)
 
             self.console.print()  # encerra a linha de progresso

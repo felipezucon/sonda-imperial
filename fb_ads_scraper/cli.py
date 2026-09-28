@@ -47,10 +47,21 @@ def main(argv=None):
     parser.add_argument("--native-user-agent", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--profile-dir", help=argparse.SUPPRESS)
     parser.add_argument("--browser-channel", choices=["chrome"], help=argparse.SUPPRESS)
+    parser.add_argument("--cdp-endpoint", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
-    if args.total_only and (args.native_user_agent or args.profile_dir or args.browser_channel):
+    if args.total_only and (args.native_user_agent or args.profile_dir or args.browser_channel or args.cdp_endpoint):
         parser.error("opções de navegador de mineração não se aplicam ao modo --total-only")
+    if args.cdp_endpoint:
+        cdp = urlparse(args.cdp_endpoint)
+        try:
+            valid_port = cdp.port is not None and 1 <= cdp.port <= 65535
+        except ValueError:
+            valid_port = False
+        if (cdp.scheme != "http" or cdp.hostname != "127.0.0.1" or not valid_port
+                or cdp.username or cdp.password or cdp.path not in ("", "/")
+                or cdp.query or cdp.fragment):
+            parser.error("--cdp-endpoint deve usar http://127.0.0.1:<porta>")
 
     console = Console()
 
@@ -82,6 +93,7 @@ def main(argv=None):
         native_user_agent=args.native_user_agent,
         profile_dir=args.profile_dir,
         browser_channel=args.browser_channel,
+        cdp_endpoint=args.cdp_endpoint,
     )
 
     try:

@@ -8,7 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fb_ads_scraper.cli import main
-from fb_ads_scraper.scraper import AdLibraryScraper, has_meta_empty_state, parse_total_results
+from fb_ads_scraper.scraper import (AdLibraryScraper, _find_global_load_more,
+                                    has_meta_empty_state, parse_total_results)
 
 
 class _Page:
@@ -17,10 +18,14 @@ class _Page:
     def __init__(self, error=None):
         self.error = error
         self.reads = []
+        self.default_body = "~15 resultados"
         self.scrolls = 0
+        self.button_metadata = []
+        self.buttons = []
 
     def on(self, *_): pass
     def goto(self, *_, **__): pass
+    def close(self): pass
     def eval_on_selector_all(self, *_): return []
     def wait_for_timeout(self, *_): pass
 
@@ -31,11 +36,23 @@ class _Page:
 
     def locator(self, *_):
         page = self
-        return type("Locator", (), {"inner_text": lambda *_args, **_kwargs: page.reads.pop(0) if page.reads else "~15 resultados"})()
+        if _ and _[0] != "body":
+            class Buttons:
+                def evaluate_all(self, *_args): return page.button_metadata
+                def nth(self, index): return page.buttons[index]
+            return Buttons()
+        return type("Locator", (), {"inner_text": lambda *_args, **_kwargs: page.reads.pop(0) if page.reads else page.default_body})()
+
+
+class _LoadMoreButton:
+    def __init__(self, click=None): self.click_action = click; self.clicks = 0
+    def click(self, **_):
+        self.clicks += 1
+        if self.click_action: self.click_action()
 
 
 class _Browser:
-    def __init__(self, page): self.page = page; self.closed = False; self.context_options = []
+    def __init__(self, page): self.page = page; self.closed = False; self.context_options = []; self.connected = None; self.contexts = []
     def new_context(self, **options):
         self.context_options.append(options)
         return type("Context", (), {"new_page": lambda _: self.page})()
@@ -47,6 +64,7 @@ class _PlaywrightContext:
     def __init__(self, page): self.page = page
     def __enter__(self):
         self.browser = _Browser(self.page)
+        self.browser.contexts = [self.browser]
         harness = self
         class Chromium:
             def launch(self, *_args, **_kwargs): return harness.browser
@@ -54,12 +72,20 @@ class _PlaywrightContext:
                 harness.browser.profile = user_data_dir
                 harness.browser.profile_options = options
                 return harness.browser
+            def connect_over_cdp(self, endpoint, **options):
+                harness.browser.connected = (endpoint, options)
+                return harness.browser
         chromium = Chromium()
         return type("Playwright", (), {"chromium": chromium})()
     def __exit__(self, *_): return False
 
 
 class PartialResultTests(unittest.TestCase):
+    def setUp(self):
+        observe = patch("fb_ads_scraper.scraper.PAGINATION_OBSERVE_SECONDS", 0)
+        observe.start()
+        self.addCleanup(observe.stop)
+
     def test_module_propagates_cli_exit_code(self):
         result = subprocess.run(
             [sys.executable, "-m", "fb_ads_scraper"],
@@ -132,6 +158,132 @@ class PartialResultTests(unittest.TestCase):
         self.assertNotIn("user_agent", context.browser.profile_options)
         self.assertEqual(context.browser.profile_options["channel"], "chrome")
 
+    def test_mining_connects_to_cdp_default_context_and_only_closes_its_page(self):
+        page = _Page()
+        context = _PlaywrightContext(page)
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", max_results=1,
+                                   cdp_endpoint="http://127.0.0.1:9222")
+        scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+        with patch("fb_ads_scraper.scraper.sync_playwright", return_value=context), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            self.assertEqual(scraper.run(), [{"ad_archive_id": "ad-1"}])
+        self.assertEqual(context.browser.connected,
+                         ("http://127.0.0.1:9222", {"timeout": 10_000}))
+        self.assertTrue(context.browser.closed)
+        self.assertFalse(hasattr(context.browser, "profile"))
+
+    def test_global_load_more_detector_requires_one_visible_bottom_button_outside_cards_and_dialogs(self):
+        page = _Page()
+        page.button_metadata = [
+            {"index": 0, "name": "ver mais", "visible": True, "enabled": True,
+             "inDialog": True, "inArticle": False, "afterLastAd": True,
+             "nearBottom": True, "pageAtBottom": True},
+            {"index": 1, "name": "ver mais", "visible": True, "enabled": True,
+             "inDialog": False, "inArticle": True, "afterLastAd": True,
+             "nearBottom": True, "pageAtBottom": True},
+            {"index": 2, "name": "ver mais", "visible": True, "enabled": True,
+             "inDialog": False, "inArticle": False, "afterLastAd": True,
+             "nearBottom": True, "pageAtBottom": True},
+        ]
+        page.buttons = [object(), object(), object()]
+        self.assertIs(_find_global_load_more(page), page.buttons[2])
+        page.button_metadata[2]["afterLastAd"] = False
+        self.assertIsNone(_find_global_load_more(page))
+        page.button_metadata[2]["afterLastAd"] = True
+        page.button_metadata.append({"index": 3, "name": "ver mais", "visible": True,
+                                     "enabled": True, "inDialog": False, "inArticle": False,
+                                     "afterLastAd": True, "nearBottom": True,
+                                     "pageAtBottom": True})
+        page.buttons.append(object())
+        self.assertIsNone(_find_global_load_more(page))
+
+    def test_clicking_global_load_more_and_new_ads_continues_collection(self):
+        page = _Page()
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", max_results=2)
+        scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+        scraper.raw_ads_observed = 1
+        page.button_metadata = [{"index": 0, "name": "ver mais", "visible": True,
+                                 "enabled": True, "inDialog": False, "inArticle": False,
+                                 "afterLastAd": True,
+                                 "nearBottom": True, "pageAtBottom": True}]
+        button = _LoadMoreButton(lambda: scraper.raw_ads.update(
+            {"ad-2": {"ad_archive_id": "ad-2"}}))
+        page.buttons = [button]
+        with patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            ads = scraper.run()
+        self.assertEqual(len(ads), 2)
+        self.assertEqual(button.clicks, 1)
+        self.assertEqual(page.scrolls, 1)
+        self.assertTrue(scraper.complete)
+
+    def test_lazy_growth_during_observation_window_needs_no_load_more_button(self):
+        page = _Page()
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", max_results=2)
+        scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+        scraper.raw_ads_observed = 1
+        waits = []
+
+        def delayed_growth(milliseconds):
+            waits.append(milliseconds)
+            if len(waits) > 16:
+                scraper.raw_ads["ad-2"] = {"ad_archive_id": "ad-2"}
+
+        page.wait_for_timeout = delayed_growth
+        with patch("fb_ads_scraper.scraper.PAGINATION_OBSERVE_SECONDS", 3), \
+             patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            ads = scraper.run()
+        self.assertEqual(len(ads), 2)
+        self.assertGreater(len(waits), 0)
+        self.assertEqual(page.scrolls, 1)
+
+    def test_repeated_load_more_without_growth_falls_back_to_stability_logic(self):
+        page = _Page()
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/")
+        scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+        scraper.raw_ads_observed = 1
+        page.button_metadata = [{"index": 0, "name": "ver mais", "visible": True,
+                                 "enabled": True, "inDialog": False, "inArticle": False,
+                                 "afterLastAd": True,
+                                 "nearBottom": True, "pageAtBottom": True}]
+        button = _LoadMoreButton()
+        page.buttons = [button]
+        with patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)), \
+             patch("fb_ads_scraper.scraper.LOAD_MORE_WAIT_SECONDS", 0), \
+             patch("fb_ads_scraper.scraper.MAX_STAGNANT_SCROLLS", 3), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            self.assertEqual(len(scraper.run()), 1)
+        self.assertEqual(button.clicks, 2)
+        self.assertFalse(scraper.complete)
+        self.assertEqual(scraper.stop_reason, "PAGINATION_STALLED")
+
+    def test_stable_end_without_button_is_complete_when_total_and_ads_agree(self):
+        page = _Page()
+        page.default_body = "1 resultado"
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/")
+        scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+        scraper.raw_ads_observed = 1
+        with patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)), \
+             patch("fb_ads_scraper.scraper.MAX_STAGNANT_SCROLLS", 2), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            scraper.run()
+        self.assertTrue(scraper.complete)
+        self.assertIsNone(scraper.stop_reason)
+
+    def test_positive_total_with_only_initial_lot_marks_stagnant_pagination_incomplete(self):
+        page = _Page()
+        page.default_body = "~14000 resultados"
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/")
+        scraper.raw_ads = {"ad-1": {"ad_archive_id": "ad-1"}}
+        scraper.raw_ads_observed = 1
+        with patch("fb_ads_scraper.scraper.sync_playwright", return_value=_PlaywrightContext(page)), \
+             patch("fb_ads_scraper.scraper.MAX_STAGNANT_SCROLLS", 2), \
+             patch("fb_ads_scraper.scraper.parse_ad", side_effect=lambda ad: ad):
+            scraper.run()
+        self.assertFalse(scraper.complete)
+        self.assertEqual(scraper.stop_reason, "PAGINATION_STALLED")
+
     def test_profile_lock_rejects_a_second_process(self):
         import os
         import subprocess
@@ -151,6 +303,18 @@ class PartialResultTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as error:
             main(["https://www.facebook.com/ads/library/", "--total-only",
                   "--profile-dir", "profile"])
+        self.assertEqual(error.exception.code, 2)
+
+    def test_total_only_rejects_cdp_endpoint(self):
+        with self.assertRaises(SystemExit) as error:
+            main(["https://www.facebook.com/ads/library/", "--total-only",
+                  "--cdp-endpoint", "http://127.0.0.1:9222"])
+        self.assertEqual(error.exception.code, 2)
+
+    def test_cdp_endpoint_must_be_ipv4_loopback(self):
+        with self.assertRaises(SystemExit) as error:
+            main(["https://www.facebook.com/ads/library/", "--cdp-endpoint",
+                  "http://0.0.0.0:9222"])
         self.assertEqual(error.exception.code, 2)
 
     def test_default_user_agent_override_remains_available_for_monitoring(self):
