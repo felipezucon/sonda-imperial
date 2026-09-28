@@ -272,7 +272,6 @@ class AdLibraryScraper:
                 except Exception as exc:
                     raise RuntimeError(f"SONDA_CDP_CONNECT_FAILED: {exc}") from exc
                 if not browser.contexts:
-                    browser.close()
                     raise RuntimeError("SONDA_CDP_CONTEXT_UNAVAILABLE")
                 context = browser.contexts[0]
                 disconnect_browser = True
@@ -300,11 +299,9 @@ class AdLibraryScraper:
                 try:
                     page.close()
                 finally:
-                    if disconnect_browser:
+                    if not disconnect_browser and browser:
                         browser.close()
-                    elif browser:
-                        browser.close()
-                    else:
+                    elif not disconnect_browser:
                         context.close()
 
             page.on("response", self._on_response)

@@ -50,7 +50,7 @@ def main(argv=None):
     parser.add_argument("--cdp-endpoint", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
-    if args.total_only and (args.native_user_agent or args.profile_dir or args.browser_channel or args.cdp_endpoint):
+    if args.total_only and (args.native_user_agent or args.profile_dir or args.browser_channel):
         parser.error("opções de navegador de mineração não se aplicam ao modo --total-only")
     if args.cdp_endpoint:
         cdp = urlparse(args.cdp_endpoint)

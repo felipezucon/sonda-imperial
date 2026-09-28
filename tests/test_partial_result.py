@@ -22,10 +22,11 @@ class _Page:
         self.scrolls = 0
         self.button_metadata = []
         self.buttons = []
+        self.closed = False
 
     def on(self, *_): pass
     def goto(self, *_, **__): pass
-    def close(self): pass
+    def close(self): self.closed = True
     def eval_on_selector_all(self, *_): return []
     def wait_for_timeout(self, *_): pass
 
@@ -52,12 +53,12 @@ class _LoadMoreButton:
 
 
 class _Browser:
-    def __init__(self, page): self.page = page; self.closed = False; self.context_options = []; self.connected = None; self.contexts = []
+    def __init__(self, page): self.page = page; self.closed = False; self.process_alive = True; self.pid = 1234; self.context_options = []; self.connected = None; self.contexts = []
     def new_context(self, **options):
         self.context_options.append(options)
         return type("Context", (), {"new_page": lambda _: self.page})()
     def new_page(self): return self.page
-    def close(self): self.closed = True
+    def close(self): self.closed = True; self.process_alive = False
 
 
 class _PlaywrightContext:
@@ -77,7 +78,7 @@ class _PlaywrightContext:
                 return harness.browser
         chromium = Chromium()
         return type("Playwright", (), {"chromium": chromium})()
-    def __exit__(self, *_): return False
+    def __exit__(self, *_): self.disconnected = True; return False
 
 
 class PartialResultTests(unittest.TestCase):
@@ -169,8 +170,56 @@ class PartialResultTests(unittest.TestCase):
             self.assertEqual(scraper.run(), [{"ad_archive_id": "ad-1"}])
         self.assertEqual(context.browser.connected,
                          ("http://127.0.0.1:9222", {"timeout": 10_000}))
-        self.assertTrue(context.browser.closed)
+        self.assertFalse(context.browser.closed)
+        self.assertTrue(context.browser.process_alive)
+        self.assertTrue(page.closed)
+        self.assertTrue(context.disconnected)
         self.assertFalse(hasattr(context.browser, "profile"))
+
+    def test_total_only_connects_to_cdp_reads_counter_and_preserves_brave(self):
+        page = _Page()
+        page.reads = ["~15 resultados"]
+        context = _PlaywrightContext(page)
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", total_only=True,
+                                   cdp_endpoint="http://127.0.0.1:9222")
+        with patch("fb_ads_scraper.scraper.sync_playwright", return_value=context):
+            self.assertEqual(scraper.run(), [])
+        self.assertEqual(scraper.total_results, 15)
+        self.assertEqual(scraper.total_results_source, "META_RESULT_COUNTER")
+        self.assertEqual(page.scrolls, 0)
+        self.assertEqual(scraper.raw_ads, {})
+        self.assertTrue(page.closed)
+        self.assertFalse(context.browser.closed)
+        self.assertTrue(context.browser.process_alive)
+        self.assertTrue(context.disconnected)
+
+    def test_total_only_cdp_accepts_empty_state_as_official_zero(self):
+        page = _Page()
+        page.reads = ["Nenhum anúncio corresponde aos seus critérios de pesquisa"]
+        context = _PlaywrightContext(page)
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", total_only=True,
+                                   cdp_endpoint="http://127.0.0.1:9222")
+        with patch("fb_ads_scraper.scraper.sync_playwright", return_value=context):
+            self.assertEqual(scraper.run(), [])
+        self.assertEqual(scraper.total_results, 0)
+        self.assertEqual(scraper.total_results_source, "META_EMPTY_STATE")
+        self.assertEqual(page.scrolls, 0)
+        self.assertFalse(context.browser.closed)
+        self.assertTrue(context.browser.process_alive)
+
+    def test_total_only_cdp_http_403_remains_error_not_zero(self):
+        page = _Page()
+        page.goto = lambda *_, **__: SimpleNamespace(status=403)
+        context = _PlaywrightContext(page)
+        scraper = AdLibraryScraper("https://www.facebook.com/ads/library/", total_only=True,
+                                   cdp_endpoint="http://127.0.0.1:9222")
+        with patch("fb_ads_scraper.scraper.sync_playwright", return_value=context):
+            with self.assertRaisesRegex(RuntimeError, "META_HTTP_ERROR: HTTP 403"):
+                scraper.run()
+        self.assertIsNone(scraper.total_results)
+        self.assertFalse(scraper.empty_state_detected)
+        self.assertFalse(context.browser.closed)
+        self.assertTrue(context.browser.process_alive)
 
     def test_global_load_more_detector_requires_one_visible_bottom_button_outside_cards_and_dialogs(self):
         page = _Page()
@@ -299,16 +348,21 @@ class PartialResultTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("SONDA_PROFILE_IN_USE", result.stderr)
 
-    def test_total_only_rejects_mining_browser_options(self):
+    def test_total_only_accepts_loopback_cdp_endpoint(self):
+        page = _Page()
+        context = _PlaywrightContext(page)
+        with tempfile.TemporaryDirectory() as output, \
+             patch("fb_ads_scraper.scraper.sync_playwright", return_value=context), \
+             patch("fb_ads_scraper.cli.export", return_value=[]):
+            self.assertEqual(main(["https://www.facebook.com/ads/library/", "--total-only",
+                                   "--format", "json", "--output", output,
+                                   "--cdp-endpoint", "http://127.0.0.1:9222"]), 0)
+        self.assertEqual(context.browser.connected[0], "http://127.0.0.1:9222")
+
+    def test_total_only_still_rejects_other_mining_browser_options(self):
         with self.assertRaises(SystemExit) as error:
             main(["https://www.facebook.com/ads/library/", "--total-only",
                   "--profile-dir", "profile"])
-        self.assertEqual(error.exception.code, 2)
-
-    def test_total_only_rejects_cdp_endpoint(self):
-        with self.assertRaises(SystemExit) as error:
-            main(["https://www.facebook.com/ads/library/", "--total-only",
-                  "--cdp-endpoint", "http://127.0.0.1:9222"])
         self.assertEqual(error.exception.code, 2)
 
     def test_cdp_endpoint_must_be_ipv4_loopback(self):
